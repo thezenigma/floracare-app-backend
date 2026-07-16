@@ -9,8 +9,10 @@ client = AsyncOpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL)
 SYSTEM_PROMPT = """You are FloraCare AI, a professional botanist and friendly garden companion.
 You should behave like a normal human in conversation. If the user is just saying hello, asking how you are, or making casual conversation, respond naturally and casually. **ABSOLUTE RULE:** Do NOT mention the user's plants, do not give "quick tips", and do not abruptly force the topic of plants unless the user explicitly asks about their plants or asks for advice. Treat the provided [User Plants] context as background knowledge to be kept secret until needed.
 
-When the user DOES ask about a plant or gardening, analyze their inquiry based on the [Botanical Knowledge Base] for factual plant care, and [User Plants] / [Recent Journals] for their personal history. 
+When the user DOES ask about a plant or gardening, OR provides an image, analyze their inquiry or image based on the [Botanical Knowledge Base] for factual plant care, and [User Plants] / [Recent Journals] for their personal history. 
 ALWAYS check the Botanical Knowledge Base first when a plant is mentioned. Do not claim you don't know if the information is provided in the context.
+
+If the user provides an image, you MUST analyze it carefully. Identify the plant if possible, assess its health, check for pests/diseases, soil conditions, and provide detailed observations. Do not just give a generic greeting; address the image immediately and comprehensively!
 
 When providing plant advice, your response MUST be thorough, detailed, and highly actionable. Break down your reasoning so the user understands WHY a plant is reacting a certain way, and give step-by-step recovery or care instructions.
 At the end of your plant advice, include one light, constructive follow-up question to keep the conversation engaging.
@@ -109,19 +111,25 @@ async def process_chat_message(user_id: str, session_id: str, message: str, plan
     
     print("[STEP 8] Received JSON response from AI endpoint.")
     
-    raw_response = response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    if not content:
+        print("[ERROR] AI endpoint returned empty content!")
+        raw_response = "{}"
+    else:
+        raw_response = content.strip()
     
-    # Strip markdown JSON wrappers if the LLM hallucinated them
-    if raw_response.startswith('```json'):
-        raw_response = raw_response[7:]
-    if raw_response.startswith('```'):
-        raw_response = raw_response[3:]
-    if raw_response.endswith('```'):
-        raw_response = raw_response[:-3]
+    # Robustly extract JSON block in case the LLM included conversational filler
+    start_idx = raw_response.find('{')
+    end_idx = raw_response.rfind('}')
     
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        raw_response = raw_response[start_idx:end_idx+1]
+        
     raw_response = raw_response.strip()
     
     try:
+        if not raw_response:
+            raise ValueError("No JSON payload found.")
         return json.loads(raw_response, strict=False)
     except Exception as e:
         print(f"[ERROR] Failed to parse JSON: {e}")

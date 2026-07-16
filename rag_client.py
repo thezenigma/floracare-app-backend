@@ -12,11 +12,16 @@ class FloraCareRAG:
         # Load local embedding model
         model_name = "nomic-ai/nomic-embed-text-v1.5"
         try:
-            self.model = SentenceTransformer(model_name, trust_remote_code=True)
-            print("Loaded Nomic Embedding Model successfully.")
-        except Exception as e:
-            print(f"Failed to load embedding model: {e}")
-            self.model = None
+            # Try offline first to avoid HuggingFace timeouts
+            self.model = SentenceTransformer(model_name, trust_remote_code=True, local_files_only=True)
+            print("Loaded Nomic Embedding Model successfully (local cache).")
+        except Exception:
+            try:
+                self.model = SentenceTransformer(model_name, trust_remote_code=True)
+                print("Loaded Nomic Embedding Model successfully (downloaded).")
+            except Exception as e:
+                print(f"Failed to load embedding model: {e}")
+                self.model = None
 
         self._init_db()
 
