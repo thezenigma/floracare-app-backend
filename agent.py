@@ -39,7 +39,8 @@ If no plant is mentioned, just output 'none'."""
         )
         extracted = response.choices[0].message.content.strip()
         if extracted.lower() == 'none' or not extracted:
-            return None
+            # Still run RAG with the raw query in case they asked about general gardening terms
+            return message
         # Combine the expanded botanical name with the original query for maximum embedding match
         return f"{extracted} {message}"
     except Exception as e:
@@ -65,11 +66,16 @@ async def process_chat_message(user_id: str, session_id: str, message: str, plan
     else:
         print("[STEP 6] RAG skipped (no plant terms detected in user query).")
 
+    import re
+    # Remove image URLs from chat history to prevent the LLM from getting confused by past images
+    clean_history = re.sub(r'\[IMAGE:.*?\]', '[Past Image Omitted]', chat_history, flags=re.IGNORECASE | re.DOTALL)
+    clean_history = re.sub(r'(https?://[^\s]+supabase\.co/storage[^\s\]]+)', '[Past Image Omitted]', clean_history, flags=re.IGNORECASE)
+
     context_block = f"""
     [User Plants]: {json.dumps(plants)}
     [Recent Journals]: {json.dumps(journals)}
     [Botanical Knowledge Base]: {rag_context}
-    [Previous Chat History]: {chat_history}
+    [Previous Chat History]: {clean_history}
     """
 
     # 2. Extract image URL if present
@@ -83,31 +89,64 @@ async def process_chat_message(user_id: str, session_id: str, message: str, plan
         # Clean the text using aggressive regex replacements
         clean_message = re.sub(r'\[IMAGE:.*?\]', '', message, flags=re.IGNORECASE | re.DOTALL)
         clean_message = clean_message.replace(image_url, '').replace('[IMAGE:', '').replace(']', '').strip()
+        
+        # If the user ONLY sent an image, give the LLM an explicit instruction to analyze it
+        if not clean_message:
+            clean_message = "Please analyze the attached image of my plant."
 
     print(f"[STEP 7] Sending prompt and compiled context to AI Endpoint ({MODEL_NAME})...")
     
     # Construct Multimodal Content Payload
-    text_prompt = f"Context:\n{context_block}\n\nUser Message: {clean_message}\n\nRespond with JSON matching: {{\"response\": \"string\", \"care_memories_created\": [{{\"memory_type\": \"diagnosis|schedule|general\", \"content\": \"string\", \"plant_id\": \"uuid\"}}], \"status\": \"success\"}}\n\nCRITICAL: The 'response' string MUST be highly structured using Markdown (e.g., use **bolding**, bullets, and insert proper ESCAPED newlines like \\\\n\\\\n between paragraphs and steps for vertical readability). Do NOT output a single block of text."
+    text_prompt = f"Context:\n{context_block}\n\nUser Message: {clean_message}\n\nRespond with JSON matching: {{\"response\": \"string\", \"care_memories_created\": [{{\"memory_type\": \"diagnosis|schedule|general\", \"content\": \"string\", \"plant_id\": \"Use exact ID from [User Plants] or null\"}}], \"status\": \"success\"}}\n\nCRITICAL: The 'response' string MUST be highly structured using Markdown (e.g., use **bolding**, bullets, and insert proper ESCAPED newlines like \\n\\n between paragraphs and steps for vertical readability). Do NOT output a single block of text. NEVER hallucinate a fake UUID for plant_id."
     
+    target_model = MODEL_NAME
     if image_url:
         print(f"         > Attached image to prompt: {image_url}")
+        
+        # Download and encode image to base64 to ensure NVIDIA NIM can read it reliably
+        import httpx
+        import base64
+        try:
+            async with httpx.AsyncClient() as http_client:
+                resp = await http_client.get(image_url, timeout=10.0)
+                if resp.status_code == 200:
+                    b64 = base64.b64encode(resp.content).decode('utf-8')
+                    # Pass base64 data URI instead of public URL
+                    image_url = f"data:image/jpeg;base64,{b64}"
+                    print("         > Successfully encoded image to base64.")
+                else:
+                    print(f"[WARNING] Failed to fetch image (Status {resp.status_code}). Using URL.")
+        except Exception as e:
+            print(f"[WARNING] Exception fetching image: {e}")
+
         content_payload = [
             {"type": "text", "text": text_prompt},
             {"type": "image_url", "image_url": {"url": image_url}}
         ]
+        # Nemotron reasoning doesn't support vision, dynamically swap to Llama Vision when image is present
+        target_model = "meta/llama-3.2-90b-vision-instruct"
+        print(f"         > Swapping to vision model: {target_model}")
     else:
         content_payload = text_prompt
 
     # 3. Call LLM demanding JSON output
-    response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": content_payload}
-        ],
-        temperature=0.3,
-        response_format={"type": "json_object"}
-    )
+    try:
+        response = await client.chat.completions.create(
+            model=target_model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": content_payload}
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+    except Exception as e:
+        print(f"[ERROR] LLM API Call Failed: {e}")
+        return {
+            "response": "I'm having trouble analyzing the image at the moment. The vision servers might be overloaded or unable to process the file.",
+            "care_memories_created": [],
+            "status": "error"
+        }
     
     print("[STEP 8] Received JSON response from AI endpoint.")
     
@@ -119,11 +158,23 @@ async def process_chat_message(user_id: str, session_id: str, message: str, plan
         raw_response = content.strip()
     
     # Robustly extract JSON block in case the LLM included conversational filler
-    start_idx = raw_response.find('{')
-    end_idx = raw_response.rfind('}')
-    
-    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-        raw_response = raw_response[start_idx:end_idx+1]
+    json_blocks = []
+    brace_count = 0
+    start = -1
+    for i, char in enumerate(raw_response):
+        if char == '{':
+            if brace_count == 0:
+                start = i
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+            if brace_count == 0 and start != -1:
+                json_blocks.append(raw_response[start:i+1])
+                start = -1
+                
+    if json_blocks:
+        # Use the last complete JSON block, as reasoning models put the final answer at the end
+        raw_response = json_blocks[-1]
         
     raw_response = raw_response.strip()
     

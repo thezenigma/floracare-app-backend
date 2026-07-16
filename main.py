@@ -122,24 +122,42 @@ async def websocket_endpoint(websocket: WebSocket):
                     chat_history=chat_history
                 )
                 
+                if not isinstance(result, dict):
+                    result = {"response": str(result), "care_memories_created": []}
+
                 # Persist generated memories to DB
-                for memory in result.get("care_memories_created", []):
+                memories = result.get("care_memories_created") or []
+                for memory in memories:
+                    if not isinstance(memory, dict):
+                        continue
+                    
                     # Ensure plant_id exists in the generated memory, or fallback to first plant_id provided
                     pid = memory.get("plant_id")
                     if pid in ["None", "null", "uuid", "", None]:
                         pid = plant_ids[0] if plant_ids else None
                         
                     if pid and str(pid).lower() not in ["none", "null", "uuid"]:
-                        save_care_memory(
-                            user_id=user_id,
-                            plant_id=pid,
-                            memory_type=memory["memory_type"],
-                            content=memory["content"],
-                            session_id=session_id
-                        )
+                        try:
+                            save_care_memory(
+                                user_id=user_id,
+                                plant_id=pid,
+                                memory_type=memory.get("memory_type", "general"),
+                                content=memory.get("content", ""),
+                                session_id=session_id
+                            )
+                        except Exception as e:
+                            print(f"[DEBUG] Failed to save care memory (likely hallucinated plant_id {pid}): {e}")
                 
                 # Save assistant message to DB first, so it isn't lost if websocket is closed
                 try:
+                    # Fallback for LLM hallucinating keys
+                    if "response" not in result:
+                        if "Response" in result: result["response"] = result["Response"]
+                        elif "message" in result: result["response"] = result["message"]
+                        elif "answer" in result: result["response"] = result["answer"]
+                        else:
+                            print(f"[DEBUG] AI result missing 'response' key! Keys found: {list(result.keys())}")
+                            
                     if "response" in result:
                         save_message(session_id, "assistant", result["response"])
                         print("[STEP 9] Saved AI response to Database.")
