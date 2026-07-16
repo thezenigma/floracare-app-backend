@@ -132,15 +132,44 @@ async def process_chat_message(user_id: str, session_id: str, message: str, plan
             "status": "error"
         }
 
+import os
+import csv
+
+KNOWN_SPECIES = []
+
+def get_known_species():
+    global KNOWN_SPECIES
+    if not KNOWN_SPECIES:
+        csv_path = os.path.join(os.path.dirname(__file__), 'scripts', 'plant_care_data_full.csv')
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                KNOWN_SPECIES = [row['species'].strip() for row in reader if row.get('species')]
+        except Exception as e:
+            print(f"Failed to load CSV: {e}")
+            KNOWN_SPECIES = []
+    return KNOWN_SPECIES
+
 async def identify_plant_species(query: str):
     print(f"\n[DEBUG] Identifying species for: {query}")
     
-    prompt = """You are a botanical assistant. The user provides a common name, scientific name, or description of a plant.
-Use your vast botanical knowledge to identify this plant.
-You must respond strictly in JSON format with a single key 'names' containing a LIST of strings.
-Include BOTH the primary common name and the scientific name, and any other prominent synonyms.
-Example: {"names": ["African Milk Tree", "Euphorbia trigona"]}
-Even if you are unsure, provide your best guesses for what the user is referring to."""
+    known = get_known_species()
+    # It's okay to send 1200 names, it's just a few kb. The Nemotron model has 32k context limit.
+    known_str = ", ".join(known)
+    
+    prompt = f"""You are a botanical taxonomy assistant.
+The user provides a common name, scientific name, or description of a plant (User Query).
+You have a specific database of known plant species.
+KNOWN DATABASE SPECIES:
+[{known_str}]
+
+Your task:
+1. Identify the plant the user is referring to.
+2. Find the EXACT MATCHING string from the KNOWN DATABASE SPECIES list.
+3. You must respond strictly in JSON format with a single key 'names' containing a LIST of strings.
+4. If you find a perfect or near-perfect match in the database, put it first in the list EXACTLY as it appears in the database.
+5. You can also include other synonyms as backup.
+Example: {{"names": ["Exact Database Name", "Another Synonym"]}}"""
     
     response = await client.chat.completions.create(
         model=MODEL_NAME,
