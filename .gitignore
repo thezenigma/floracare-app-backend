@@ -1,0 +1,13 @@
+# Environments
+.env
+.env.local
+.venv
+env/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# RAG DB
+chroma_db/
