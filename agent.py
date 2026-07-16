@@ -133,22 +133,20 @@ async def process_chat_message(user_id: str, session_id: str, message: str, plan
         }
 
 async def identify_plant_species(query: str):
-    expanded_query = await expand_query(query)
-    print(f"\n[DEBUG] Expanded Query for species identification: {expanded_query}")
-    rag_context = get_relevant_context(expanded_query)
+    print(f"\n[DEBUG] Identifying species for: {query}")
     
     prompt = """You are a botanical assistant. The user provides a common name, scientific name, or description of a plant.
-Use the provided Botanical Knowledge Base context to identify this plant.
+Use your vast botanical knowledge to identify this plant.
 You must respond strictly in JSON format with a single key 'names' containing a LIST of strings.
-Include BOTH the primary common name and the scientific name, and any other prominent names found in the context.
+Include BOTH the primary common name and the scientific name, and any other prominent synonyms.
 Example: {"names": ["African Milk Tree", "Euphorbia trigona"]}
-If no good match is found, return an empty list."""
+Even if you are unsure, provide your best guesses for what the user is referring to."""
     
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
             {"role": "system", "content": prompt},
-            {"role": "user", "content": f"Context:\n{rag_context}\n\nUser Query: {query}\n\nRespond with JSON matching: {{\"names\": [\"Name 1\", \"Name 2\"]}}"}
+            {"role": "user", "content": f"User Query: {query}\n\nRespond with JSON matching: {{\"names\": [\"Name 1\", \"Name 2\"]}}"}
         ],
         temperature=0.1,
         response_format={"type": "json_object"}
